@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <Transition name="slide-up">
     <div v-if="show" class="tts-controls" :style="{ background: theme.popup, color: theme.fontColor }">
       <div class="tts-head">
@@ -7,6 +7,7 @@
           <div class="tts-mode">
             当前模式: {{ providerLabel }}
             <span v-if="provider === 'openai'"> · {{ openaiSource === 'server' ? '后端配置' : `${openaiModel} / ${openaiVoice}` }}</span>
+            <span v-else-if="provider === 'mimo'"> · {{ mimoSource === 'server' ? '后端配置' : `${mimoModel} / ${mimoVoice}` }}</span>
           </div>
         </div>
         <button class="tts-close" @click="$emit('close')" aria-label="close tts panel">
@@ -17,7 +18,7 @@
       </div>
       <div class="tts-btns">
         <button @click="$emit('prev')">上一段</button>
-        <button :disabled="isLoading" @click="$emit('toggle-play')">{{ isLoading ? '加载中' : (!isSpeaking ? '开始' : (isPaused ? '恢复' : '暂停')) }}</button>
+        <button :disabled="isLoading" @click="$emit('toggle-play')">{{ isLoading ? '加载中' : (isPaused ? '恢复' : (!isSpeaking ? '开始' : '暂停')) }}</button>
         <button @click="$emit('stop')">停止</button>
         <button @click="$emit('next')">下一段</button>
       </div>
@@ -30,6 +31,9 @@
       <div v-else-if="openaiSource === 'server'" class="tts-source-note">
         OpenAI Speech 使用后端配置
       </div>
+      <div v-else-if="mimoSource === 'server'" class="tts-source-note">
+        MiMo TTS 使用后端配置
+      </div>
       <input
         v-else
         class="tts-voice-select"
@@ -38,7 +42,7 @@
         placeholder="alloy"
         @input="$emit('openai-voice-change', ($event.target as HTMLInputElement).value)"
       >
-      <div class="tts-tuning">
+      <div v-if="provider !== 'mimo'" class="tts-tuning">
         <div class="tts-stepper">
           <span class="tts-label">语速</span>
           <button @click="$emit('rate-change', -0.1)">-</button>
@@ -73,7 +77,7 @@ defineProps<{
   show: boolean
   theme: ThemePreset | { popup: string; fontColor: string }
   chapterTitle?: string
-  provider: 'system' | 'openai'
+  provider: 'system' | 'openai' | 'mimo'
   providerLabel: string
   isSpeaking: boolean
   isLoading: boolean
@@ -86,6 +90,9 @@ defineProps<{
   openaiModel: string
   openaiVoice: string
   openaiSource: 'browser' | 'server'
+  mimoModel: string
+  mimoVoice: string
+  mimoSource: 'browser' | 'server'
   stopAfterMinutes: number
   timerText: string
 }>()

@@ -1,5 +1,15 @@
 import type { ComputedRef, Ref } from 'vue'
 import type { useReaderStore } from '../stores/reader'
+import {
+  MIMO_PRELOAD_MAX,
+} from '../utils/mimoSpeech'
+import {
+  buildChapterTextIndex,
+  paragraphIndexesInRange,
+  planMimoFastStartChunk,
+  planNextMimoChunk,
+  type ChapterTextIndex,
+} from '../utils/mimoChunker'
 
 type ReaderStore = ReturnType<typeof useReaderStore>
 const OPENAI_SPEECH_CHUNK_CHAR_LIMIT = 70
@@ -33,6 +43,14 @@ export function useReaderAutoPlayback(
   let currentSpeechParagraph: HTMLElement | null = null
   let currentSpeechSegments: { text: string; nextParagraph: HTMLElement | null }[] = []
   let currentSpeechSegmentIndex = 0
+
+  /* ─── MiMo 分片播放状态 ─── */
+  let mimoIndex: ChapterTextIndex | null = null
+  let mimoIndexParagraphs: HTMLElement[] = []
+  let mimoChunkStarts: number[] = []
+  let mimoCurrentChunk: { start: number; end: number } | null = null
+  /** 快速启动武装位：只对下一次分片规划生效一次 */
+  let mimoFastStartPending = false
 
   function isSafariSpeechDelayBrowser() {
     if (typeof navigator === 'undefined') return false
@@ -307,6 +325,210 @@ export function useReaderAutoPlayback(
     }
   }
 
+  function markReadingParagraphs(paragraphs: HTMLElement[]) {
+    clearReadingClass()
+    paragraphs.forEach((paragraph) => paragraph.classList.add('reading'))
+  }
+
+  /* ─── MiMo 分片播放 ─── */
+
+  function isMimoSpeech() {
+    return store.speechConfig.provider === 'mimo'
+  }
+
+  /**
+   * 章节文本索引按 DOM 段落缓存：连续模式下追章只做前缀追加，偏移依然有效；
+   * 章节整体变化（前缀不一致）时重置分片历史。
+   */
+  function getMimoChapterIndex() {
+    const paragraphs = getFilteredParagraphs()
+    if (!paragraphs.length) return null
+
+    const sameParagraphs = mimoIndexParagraphs.length === paragraphs.length
+      && paragraphs.every((element, index) => mimoIndexParagraphs[index] === element)
+    if (mimoIndex && sameParagraphs) {
+      return { index: mimoIndex, paragraphs }
+    }
+
+    const nextIndex = buildChapterTextIndex(paragraphs.map((paragraph) => paragraph.innerText.trim()))
+    const prefixUnchanged = !!mimoIndex && nextIndex.text.startsWith(mimoIndex.text)
+    mimoIndex = nextIndex
+    mimoIndexParagraphs = paragraphs
+    if (!prefixUnchanged) {
+      mimoChunkStarts = []
+      mimoCurrentChunk = null
+    }
+    return { index: nextIndex, paragraphs }
+  }
+
+  function mimoChapterLength(index: ChapterTextIndex) {
+    return index.paragraphRanges[index.paragraphRanges.length - 1]?.end ?? 0
+  }
+
+  function mimoPreloadCount() {
+    return Math.min(MIMO_PRELOAD_MAX, Math.max(1, Math.round(store.speechConfig.mimoPreloadCount)))
+  }
+
+  function preloadMimoUpcoming(fromOffset: number) {
+    if (!isMimoSpeech()) return
+    const resolved = getMimoChapterIndex()
+    if (!resolved) return
+    const total = mimoChapterLength(resolved.index)
+    if (fromOffset >= total) return
+
+    const texts: string[] = []
+    let cursor = fromOffset
+    while (texts.length < mimoPreloadCount()) {
+      const chunk = planNextMimoChunk(resolved.index.text, cursor)
+      if (!chunk.text) break
+      texts.push(chunk.text)
+      cursor = chunk.end
+    }
+    if (texts.length) {
+      window.setTimeout(() => {
+        void store.preloadSpeechAudio(texts)
+      }, 0)
+    }
+  }
+
+  /**
+   * 分片规划入口。快速启动只武装到「下一次」规划：
+   * 正常分片已有预载音频（缓存秒开）就直接按正常分片播；
+   * 没有预载则第一片只取 200 字（向后标点吸附最多 300 字）尽快出声，
+   * 之后的分片全部回到正常均衡规划。
+   */
+  function planMimoChunkAt(index: ChapterTextIndex, offset: number) {
+    const normal = planNextMimoChunk(index.text, offset)
+    if (!mimoFastStartPending) return normal
+    mimoFastStartPending = false
+    if (!normal.text) return normal
+    if (store.hasSpeechAudio(normal.text)) return normal
+    return planMimoFastStartChunk(index.text, offset)
+  }
+
+  function playMimoChunkAt(offset: number, interruptCurrent: boolean) {
+    const resolved = getMimoChapterIndex()
+    if (!resolved) {
+      mimoFastStartPending = false
+      store.stopTTS()
+      return
+    }
+    const { index, paragraphs } = resolved
+    const chunk = planMimoChunkAt(index, offset)
+    if (!chunk.text.trim()) {
+      continueMimoToNextChapter()
+      return
+    }
+
+    mimoCurrentChunk = { start: chunk.start, end: chunk.end }
+    if (mimoChunkStarts[mimoChunkStarts.length - 1] !== chunk.start) {
+      mimoChunkStarts.push(chunk.start)
+    }
+
+    const rangeParagraphs = paragraphIndexesInRange(index, chunk.start, chunk.end)
+      .map((paragraphIndex) => paragraphs[paragraphIndex])
+      .filter((paragraph): paragraph is HTMLElement => !!paragraph)
+    markReadingParagraphs(rangeParagraphs)
+    showParagraph(rangeParagraphs[0] || null)
+
+    logSpeech('mimo speak chunk', {
+      provider: store.speechConfig.provider,
+      start: chunk.start,
+      end: chunk.end,
+      isChapterEnd: chunk.isChapterEnd,
+      text: chunk.text.slice(0, 60),
+    })
+    store.startTTS(chunk.text, {
+      onEnd: () => {
+        if (mimoCurrentChunk?.start !== chunk.start) return
+        if (chunk.isChapterEnd) {
+          continueMimoToNextChapter()
+          return
+        }
+        continueMimoSpeech(chunk.end)
+      },
+      onError: () => {
+        clearReadingClass()
+      },
+    }, interruptCurrent)
+    preloadMimoUpcoming(chunk.end)
+  }
+
+  function startMimoSpeech(paragraph?: HTMLElement | null, interruptCurrent = true) {
+    const resolved = getMimoChapterIndex()
+    if (!resolved) {
+      store.stopTTS()
+      return
+    }
+    const target = paragraph || getCurrentParagraph()
+    const paragraphIndex = target ? resolved.paragraphs.indexOf(target) : -1
+    const offset = paragraphIndex >= 0
+      ? resolved.index.paragraphRanges[paragraphIndex].start
+      : 0
+    if (mimoChunkStarts[mimoChunkStarts.length - 1] !== offset) {
+      mimoChunkStarts = [offset]
+    }
+    // 开始听书/切章的第一次请求：武装快速启动
+    mimoFastStartPending = true
+    playMimoChunkAt(offset, interruptCurrent)
+  }
+
+  function continueMimoSpeech(offset: number) {
+    if (store.isPaused) return
+    playMimoChunkAt(offset, false)
+  }
+
+  function continueMimoToNextChapter() {
+    if (!store.hasNext) {
+      store.stopTTS()
+      clearReadingClass()
+      return
+    }
+    mimoChunkStarts = []
+    mimoCurrentChunk = null
+    Promise.resolve(nextChapter())
+      .then(() => {
+        window.setTimeout(() => {
+          if (store.isPaused) return
+          startMimoSpeech(getFilteredParagraphs()[0] || null, false)
+        }, 120)
+      })
+      .catch(() => undefined)
+  }
+
+  function skipMimoChunk(interruptCurrent = true) {
+    const resolved = getMimoChapterIndex()
+    const total = resolved ? mimoChapterLength(resolved.index) : 0
+    const nextOffset = mimoCurrentChunk?.end ?? 0
+    if (!resolved || nextOffset >= total) {
+      continueMimoToNextChapter()
+      return
+    }
+    playMimoChunkAt(nextOffset, interruptCurrent)
+  }
+
+  function prevMimoChunk() {
+    if (mimoChunkStarts.length >= 2) {
+      mimoChunkStarts.pop()
+      const target = mimoChunkStarts[mimoChunkStarts.length - 1]
+      // 回放历史片：按快速启动规则复现当初那片（预载命中则走正常分片）
+      mimoFastStartPending = true
+      playMimoChunkAt(target, true)
+      return
+    }
+    if (!store.hasPrev) {
+      store.stopTTS()
+      return
+    }
+    store.stopTTS(false)
+    Promise.resolve(prevChapter()).then(() => {
+      window.setTimeout(() => {
+        const list = getFilteredParagraphs()
+        startMimoSpeech(list[list.length - 1] || null, false)
+      }, 120)
+    })
+  }
+
   function runAutoScroll() {
     if (!store.isAutoScrolling || !scrollContainerRef.value) return
 
@@ -488,6 +710,10 @@ export function useReaderAutoPlayback(
   }
 
   function startSpeech(paragraph?: HTMLElement | null, interruptCurrent = true) {
+    if (isMimoSpeech()) {
+      startMimoSpeech(paragraph ?? null, interruptCurrent)
+      return
+    }
     const current = paragraph || getCurrentParagraph()
     logSpeech('startSpeech', {
       interruptCurrent,
@@ -551,12 +777,16 @@ export function useReaderAutoPlayback(
     const preloadTexts = getUpcomingSpeechChunks(nextParagraph)
     if (preloadTexts.length) {
       window.setTimeout(() => {
-        void store.preloadOpenAITTS(preloadTexts)
+        void store.preloadSpeechAudio(preloadTexts)
       }, 0)
     }
   }
 
   function speechPrev() {
+    if (isMimoSpeech()) {
+      prevMimoChunk()
+      return
+    }
     logSpeech('speechPrev', {
       currentParagraph: paragraphPreview(getCurrentParagraph()),
       hasPrevChapter: store.hasPrev,
@@ -581,6 +811,10 @@ export function useReaderAutoPlayback(
   }
 
   function speechNext(forcedNext?: HTMLElement | null, interruptCurrent = true) {
+    if (isMimoSpeech()) {
+      skipMimoChunk(interruptCurrent)
+      return
+    }
     logSpeech('speechNext', {
       interruptCurrent,
       forcedNext: paragraphPreview(forcedNext || null),
@@ -609,6 +843,13 @@ export function useReaderAutoPlayback(
   }
 
   function restartSpeechFromCurrentParagraph() {
+    if (isMimoSpeech()) {
+      const start = mimoChunkStarts[mimoChunkStarts.length - 1] ?? 0
+      // 重启当前片（换音色/语速后缓存已失效）：重新武装快速启动
+      mimoFastStartPending = true
+      playMimoChunkAt(start, true)
+      return
+    }
     logSpeech('restartSpeechFromCurrentParagraph', {
       currentParagraph: paragraphPreview(getCurrentParagraph()),
       isSpeechTransitioning,
@@ -660,6 +901,9 @@ export function useReaderAutoPlayback(
   function disposeAutoPlayback() {
     cancelSpeechTransition()
     stopAutoScroll()
+    mimoChunkStarts = []
+    mimoCurrentChunk = null
+    mimoFastStartPending = false
   }
 
   return {

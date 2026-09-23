@@ -29,7 +29,7 @@ function buildAuthHeaders(apiKey?: string) {
   return headers
 }
 
-async function readSpeechError(response: Response) {
+export async function readSpeechError(response: Response) {
   const fallback = `语音请求失败 (${response.status})`
   const contentType = response.headers.get('content-type') || ''
 

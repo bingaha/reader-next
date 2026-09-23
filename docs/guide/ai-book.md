@@ -84,7 +84,7 @@ AI资料支持两种模型来源。
 
 - 文本模型
 - 图片模型
-- OpenAI Speech 语音模型
+- 语音模型（OpenAI Speech 填 `/v1/audio/speech`；MiMo TTS 填 `/v1/chat/completions`，模型填 `mimo-v2.5-tts`）
 
 普通用户使用后端配置时，请先让管理员在 **用户管理** 中为该账号打开 **AI模型** 权限。
 

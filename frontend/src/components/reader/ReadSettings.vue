@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="read-settings" :style="{ background: theme.popup, color: theme.fontColor }">
     <div class="settings-header">
       <h3 class="settings-title">设置</h3>
@@ -215,6 +215,7 @@
         <div class="btn-group">
           <button class="opt-btn" :class="{ active: store.speechConfig.provider === 'system' }" @click="store.setSpeechProvider('system')">系统语音</button>
           <button class="opt-btn" :class="{ active: store.speechConfig.provider === 'openai' }" @click="store.setSpeechProvider('openai')">OpenAI Speech</button>
+          <button class="opt-btn" :class="{ active: store.speechConfig.provider === 'mimo' }" @click="store.setSpeechProvider('mimo')">MiMo TTS</button>
         </div>
       </div>
 
@@ -228,7 +229,114 @@
         </select>
       </div>
 
-      <template v-else>
+      <!-- MiMo TTS -->
+      <template v-if="store.speechConfig.provider === 'mimo'">
+        <div class="setting-row">
+          <label>模型来源</label>
+          <div class="btn-group">
+            <button
+              class="opt-btn"
+              :class="{ active: store.speechConfig.mimoSource === 'browser' }"
+              @click="store.setMimoSpeechSource('browser')"
+            >
+              自己配置
+            </button>
+            <button
+              class="opt-btn"
+              :class="{ active: store.speechConfig.mimoSource === 'server' }"
+              :disabled="serverModelLoaded && !canUseServerModel"
+              @click="selectMimoSpeechSource('server')"
+            >
+              后端配置
+            </button>
+          </div>
+        </div>
+
+        <template v-if="store.speechConfig.mimoSource === 'browser'">
+          <div class="setting-row setting-row-top">
+            <label>服务地址</label>
+            <input
+              class="voice-select"
+              type="url"
+              :value="store.speechConfig.mimoBaseUrl"
+              placeholder="https://api.xiaomimimo.com/v1"
+              @input="store.setMimoSpeechBaseUrl(($event.target as HTMLInputElement).value)"
+            >
+          </div>
+
+          <div class="setting-row setting-row-top">
+            <label>API Key</label>
+            <input
+              class="voice-select"
+              type="password"
+              :value="store.speechConfig.mimoApiKey"
+              placeholder="sk-..."
+              autocomplete="off"
+              @input="store.setMimoSpeechApiKey(($event.target as HTMLInputElement).value)"
+            >
+          </div>
+        </template>
+
+        <div v-else class="server-speech-note">
+          <template v-if="canUseServerModel">
+            使用管理员配置的 MiMo 语音模型、音色和音频格式。请求通过后端代理转发，浏览器不会保存后端 API Key。
+          </template>
+          <template v-else>
+            当前账号没有使用后端模型配置的权限，请让管理员在用户管理中开启“AI 模型”，或切回自己配置。
+          </template>
+        </div>
+
+        <div class="setting-row setting-row-top">
+          <label>语音模型</label>
+          <input
+            class="voice-select"
+            type="text"
+            :value="store.speechConfig.mimoModel"
+            placeholder="mimo-v2.5-tts"
+            @input="store.setMimoSpeechModel(($event.target as HTMLInputElement).value)"
+          >
+        </div>
+
+        <div class="setting-row setting-row-top">
+          <label>语音音色</label>
+          <select
+            class="voice-select"
+            :value="store.speechConfig.mimoVoice"
+            @change="store.setMimoSpeechVoice(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="voice in mimoVoices" :key="voice" :value="voice">{{ voice }}</option>
+          </select>
+        </div>
+
+        <div class="setting-row setting-row-top">
+          <label>音频格式</label>
+          <select
+            class="voice-select"
+            :value="store.speechConfig.mimoFormat"
+            @change="store.setMimoSpeechFormat(($event.target as HTMLSelectElement).value as 'wav' | 'mp3')"
+          >
+            <option value="mp3">mp3（体积小，推荐）</option>
+            <option value="wav">wav（无损，体积大）</option>
+          </select>
+        </div>
+
+        <div class="setting-row setting-row-top">
+          <label>预载分片数</label>
+          <div class="stepper">
+            <button class="step-btn" :disabled="store.speechConfig.mimoPreloadCount <= 1" @click="store.setMimoPreloadCount(store.speechConfig.mimoPreloadCount - 1)">—</button>
+            <span class="step-val">{{ store.speechConfig.mimoPreloadCount }}</span>
+            <button class="step-btn" :disabled="store.speechConfig.mimoPreloadCount >= 10" @click="store.setMimoPreloadCount(store.speechConfig.mimoPreloadCount + 1)">+</button>
+          </div>
+        </div>
+
+        <div class="setting-hint">
+          MiMo 单次最多合成约 2400 字，超长章节会自动均衡分片；章节开头会先用 200 字快速出声，再依次 500 字、均衡分片。
+          429 限流会自动退避重试。URL 和 Key 仅保存在当前浏览器。
+        </div>
+      </template>
+
+      <!-- OpenAI Speech -->
+      <template v-else-if="store.speechConfig.provider === 'openai'">
         <div class="setting-row">
           <label>模型来源</label>
           <div class="btn-group">
@@ -348,7 +456,7 @@
         </div>
       </template>
 
-      <div class="setting-row setting-row-top">
+      <div v-if="store.speechConfig.provider !== 'system' && store.speechConfig.provider !== 'mimo'" class="setting-row setting-row-top">
         <label>朗读语速</label>
         <div class="stepper">
           <button class="step-btn" @click="adjustSpeechRate(-0.1)">—</button>
@@ -398,6 +506,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useReaderStore, themePresets, fontPresets } from '../../stores/reader'
 import { useAiBookStore } from '../../stores/aiBook'
 import { useAppStore } from '../../stores/app'
+import { MIMO_VOICES } from '../../utils/mimoSpeech'
 
 const store = useReaderStore()
 const aiBookStore = useAiBookStore()
@@ -406,6 +515,7 @@ const config = computed(() => store.config)
 const theme = computed(() => store.currentTheme)
 const serverModelLoaded = ref(false)
 const canUseServerModel = computed(() => Boolean(aiBookStore.serverModelConfig?.canUseServerModel))
+const mimoVoices = MIMO_VOICES
 
 function step(key: 'fontSize' | 'fontWeight' | 'pageWidth' | 'animateDuration' | 'scrollPixel' | 'pageSpeed', delta: number, min: number, max: number) {
   const val = Math.max(min, Math.min(max, (config.value[key] as number) + delta))
@@ -449,12 +559,32 @@ async function selectOpenAISpeechSource(source: 'browser' | 'server') {
   store.setOpenAISpeechSource('server')
 }
 
+async function selectMimoSpeechSource(source: 'browser' | 'server') {
+  if (source === 'browser') {
+    store.setMimoSpeechSource('browser')
+    return
+  }
+  if (!serverModelLoaded.value) {
+    await aiBookStore.loadServerModelConfig({ force: true })
+    serverModelLoaded.value = true
+  }
+  if (!canUseServerModel.value) {
+    store.setMimoSpeechSource('browser')
+    appStore.showToast('当前账号没有使用后端模型配置的权限', 'warning')
+    return
+  }
+  store.setMimoSpeechSource('server')
+}
+
 onMounted(async () => {
   store.fetchVoices()
   await aiBookStore.loadServerModelConfig({ force: true })
   serverModelLoaded.value = true
   if (store.speechConfig.openaiSource === 'server' && !canUseServerModel.value) {
     store.setOpenAISpeechSource('browser')
+  }
+  if (store.speechConfig.mimoSource === 'server' && !canUseServerModel.value) {
+    store.setMimoSpeechSource('browser')
   }
 })
 </script>

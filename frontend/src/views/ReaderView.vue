@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div
     class="reader-view"
     :class="{ 'disable-system-callout': disableSystemCallout }"
@@ -90,6 +90,9 @@
       :openai-model="store.speechConfig.openaiModel"
       :openai-voice="store.speechConfig.openaiVoice"
       :openai-source="store.speechConfig.openaiSource"
+      :mimo-model="store.speechConfig.mimoModel"
+      :mimo-voice="store.speechConfig.mimoVoice"
+      :mimo-source="store.speechConfig.mimoSource"
       :stop-after-minutes="store.speechConfig.stopAfterMinutes"
       :timer-text="speechTimerText"
       @close="closeTTSPanel"
@@ -423,6 +426,17 @@
                       <span>语音 API Key</span>
                       <input v-model="aiModelConfig.speech.apiKey" type="password" autocomplete="off" />
                     </label>
+                    <label class="summary-setting-field">
+                      <span>语音音色</span>
+                      <input v-model="aiModelConfig.speech.voice" placeholder="alloy / 冰糖" />
+                    </label>
+                    <label class="summary-setting-field">
+                      <span>音频格式</span>
+                      <input v-model="aiModelConfig.speech.responseFormat" placeholder="mp3 / wav" />
+                    </label>
+                    <div class="summary-setting-hint">
+                      OpenAI Speech 填 /v1/audio/speech；MiMo TTS 填 /v1/chat/completions，模型填 mimo-v2.5-tts。
+                    </div>
 
                     <div class="summary-actions compact">
                       <button class="summary-action" :disabled="!aiModelIsAdmin || aiModelSaving" @click="handleSaveAiModelConfig">
@@ -741,6 +755,17 @@
                       <span>语音 API Key</span>
                       <input v-model="aiModelConfig.speech.apiKey" type="password" autocomplete="off" />
                     </label>
+                    <label class="summary-setting-field">
+                      <span>语音音色</span>
+                      <input v-model="aiModelConfig.speech.voice" placeholder="alloy / 冰糖" />
+                    </label>
+                    <label class="summary-setting-field">
+                      <span>音频格式</span>
+                      <input v-model="aiModelConfig.speech.responseFormat" placeholder="mp3 / wav" />
+                    </label>
+                    <div class="summary-setting-hint">
+                      OpenAI Speech 填 /v1/audio/speech；MiMo TTS 填 /v1/chat/completions，模型填 mimo-v2.5-tts。
+                    </div>
 
                     <div class="summary-actions compact">
                       <button class="summary-action" :disabled="!aiModelIsAdmin || aiModelSaving" @click="handleSaveAiModelConfig">
@@ -1032,6 +1057,17 @@
                 <span>语音 API Key</span>
                 <input v-model="aiModelConfig.speech.apiKey" type="password" autocomplete="off" />
               </label>
+              <label class="summary-setting-field">
+                <span>语音音色</span>
+                <input v-model="aiModelConfig.speech.voice" placeholder="alloy / 冰糖" />
+              </label>
+              <label class="summary-setting-field">
+                <span>音频格式</span>
+                <input v-model="aiModelConfig.speech.responseFormat" placeholder="mp3 / wav" />
+              </label>
+              <div class="summary-setting-hint">
+                OpenAI Speech 填 /v1/audio/speech；MiMo TTS 填 /v1/chat/completions，模型填 mimo-v2.5-tts。
+              </div>
 
               <div class="summary-actions compact">
                 <button class="summary-action" :disabled="!aiModelIsAdmin || aiModelSaving" @click="handleSaveAiModelConfig">
@@ -2638,12 +2674,14 @@ function closeTTSPanel() {
 function toggleSpeechFromPanel() {
   ttsPanelDismissed.value = false
   showTTSPanel.value = true
-  if (!store.isSpeaking) {
-    startSpeech()
+  // 网络 TTS（MiMo/OpenAI）暂停后 isSpeaking=false、isPaused=true，
+  // 必须优先走恢复：直接从暂停位置继续播放，不重新发起 TTS 请求
+  if (store.isPaused || store.isSpeaking) {
+    cancelSpeechTransition()
+    store.pauseTTS()
     return
   }
-  cancelSpeechTransition()
-  store.pauseTTS()
+  startSpeech()
 }
 
 function handleStopTTS() {
@@ -3597,6 +3635,12 @@ watch(
 .summary-setting-row > span,
 .summary-setting-field > span {
   opacity: 0.72;
+}
+
+.summary-setting-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: 0.6;
 }
 
 .summary-setting-field input,

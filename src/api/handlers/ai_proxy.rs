@@ -32,7 +32,7 @@ pub async fn ai_proxy(
     };
     if let Some(kind) = kind {
         if kind != AiModelKind::Text || !is_native_gemini_generate_content_path(target_hint) {
-            apply_server_model_body_defaults(&endpoint, kind, &mut body);
+            apply_server_model_body_defaults(&endpoint, kind, target_hint, &mut body);
         }
     }
     adapt_ai_proxy_body(target_hint, kind, &mut body);
@@ -154,6 +154,7 @@ fn resolve_server_ai_model_path(
 fn apply_server_model_body_defaults(
     endpoint: &ResolvedAiModelEndpoint,
     kind: AiModelKind,
+    path_hint: &str,
     body: &mut Value,
 ) {
     if endpoint.model.is_empty() {
@@ -173,17 +174,42 @@ fn apply_server_model_body_defaults(
         }
     }
     if kind == AiModelKind::Speech {
+        // OpenAI speech endpoints take top-level voice/response_format, while
+        // chat-completions style audio endpoints (e.g. MiMo TTS) expect them
+        // nested under the `audio` object.
+        let nested_audio = is_chat_completions_path(path_hint);
         if let Some(voice) = endpoint.voice.as_ref().filter(|v| !v.trim().is_empty()) {
-            obj.insert("voice".to_string(), Value::String(voice.clone()));
+            insert_speech_body_field(obj, nested_audio, "voice", Value::String(voice.clone()));
         }
         if let Some(format) = endpoint
             .response_format
             .as_ref()
             .filter(|v| !v.trim().is_empty())
         {
-            obj.insert("response_format".to_string(), Value::String(format.clone()));
+            insert_speech_body_field(obj, nested_audio, "format", Value::String(format.clone()));
         }
     }
+}
+
+fn insert_speech_body_field(obj: &mut Map<String, Value>, nested_audio: bool, key: &str, value: Value) {
+    if !nested_audio {
+        let top_level_key = if key == "format" { "response_format" } else { key };
+        obj.insert(top_level_key.to_string(), value);
+        return;
+    }
+
+    let audio = obj
+        .entry("audio")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Some(audio_obj) = audio.as_object_mut() {
+        audio_obj.insert(key.to_string(), value);
+    }
+}
+
+fn is_chat_completions_path(path: &str) -> bool {
+    path.split('?')
+        .next()
+        .is_some_and(|path| path.ends_with("/chat/completions"))
 }
 
 fn adapt_ai_proxy_body(path: &str, kind: Option<AiModelKind>, body: &mut Value) {
@@ -654,6 +680,84 @@ mod tests {
         }
     }
 
+    fn speech_endpoint(path: &str) -> ResolvedAiModelEndpoint {
+        ResolvedAiModelEndpoint {
+            voice: Some("冰糖".to_string()),
+            response_format: Some("mp3".to_string()),
+            ..endpoint(path, false)
+        }
+    }
+
+    #[test]
+    fn server_speech_defaults_nest_into_audio_for_chat_completions_path() {
+        let mut body = serde_json::json!({
+            "messages": [{ "role": "assistant", "content": "待合成文本" }],
+            "audio": { "format": "wav" }
+        });
+
+        apply_server_model_body_defaults(
+            &speech_endpoint("/v1/chat/completions"),
+            AiModelKind::Speech,
+            "/v1/chat/completions",
+            &mut body,
+        );
+
+        assert_eq!(body["model"], Value::String("model".to_string()));
+        assert_eq!(
+            body.pointer("/audio/voice"),
+            Some(&Value::String("冰糖".to_string()))
+        );
+        assert_eq!(
+            body.pointer("/audio/format"),
+            Some(&Value::String("mp3".to_string()))
+        );
+        assert!(body.get("voice").is_none());
+        assert!(body.get("response_format").is_none());
+    }
+
+    #[test]
+    fn server_speech_defaults_create_audio_object_when_missing() {
+        let mut body = serde_json::json!({ "messages": [] });
+
+        apply_server_model_body_defaults(
+            &speech_endpoint("/v1/chat/completions"),
+            AiModelKind::Speech,
+            "/v1/chat/completions",
+            &mut body,
+        );
+
+        assert_eq!(
+            body.pointer("/audio/voice"),
+            Some(&Value::String("冰糖".to_string()))
+        );
+        assert_eq!(
+            body.pointer("/audio/format"),
+            Some(&Value::String("mp3".to_string()))
+        );
+    }
+
+    #[test]
+    fn server_speech_defaults_stay_top_level_for_openai_speech_path() {
+        let mut body = serde_json::json!({ "input": "待合成文本" });
+
+        apply_server_model_body_defaults(
+            &speech_endpoint("/v1/audio/speech"),
+            AiModelKind::Speech,
+            "/v1/audio/speech",
+            &mut body,
+        );
+
+        assert_eq!(
+            body.get("voice"),
+            Some(&Value::String("冰糖".to_string()))
+        );
+        assert_eq!(
+            body.get("response_format"),
+            Some(&Value::String("mp3".to_string()))
+        );
+        assert!(body.get("audio").is_none());
+    }
+
     #[test]
     fn server_ai_proxy_path_prefers_configured_or_requested_path() {
         assert_eq!(
@@ -676,6 +780,14 @@ mod tests {
             resolve_server_ai_model_path(&endpoint("", true), AiModelKind::Text, ""),
             "",
         );
+    }
+
+    #[test]
+    fn mimo_chat_completions_target_joins_without_duplicate_v1() {
+        // MiMo base_url 自带 /v1，代理路径也是 /v1/chat/completions，不能拼出 /v1/v1
+        let target = build_ai_proxy_url("https://api.xiaomimimo.com/v1", "/v1/chat/completions", false)
+            .expect("mimo target");
+        assert_eq!(target.as_str(), "https://api.xiaomimimo.com/v1/chat/completions");
     }
 
     #[test]

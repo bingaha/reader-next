@@ -1,4 +1,4 @@
-﻿import { defineStore } from 'pinia'
+import { defineStore } from 'pinia'
 import { ref, computed, reactive, watch } from 'vue'
 import { useAppStore } from './app'
 import { useBookshelfStore } from './bookshelf'
@@ -21,6 +21,16 @@ import type { Book, BookChapter, Bookmark, ReplaceRule } from '../types'
 import { getBrowserCachedChapter, setBrowserCachedChapter } from '../utils/browserCache'
 import { isLocalTxtBook } from '../utils/localBook'
 import { saveRecentReadBook } from '../utils/recentBooks'
+import {
+  DEFAULT_MIMO_BASE_URL,
+  DEFAULT_MIMO_FORMAT,
+  DEFAULT_MIMO_MODEL,
+  DEFAULT_MIMO_VOICE,
+  MIMO_PRELOAD_DEFAULT,
+  MIMO_PRELOAD_MAX,
+  requestMimoSpeechAudio,
+} from '../utils/mimoSpeech'
+import { MIMO_MAX_CHUNK_CHARS } from '../utils/mimoChunker'
 import {
   DEFAULT_OPENAI_BASE_URL,
   requestOpenAISpeechAudio,
@@ -184,17 +194,25 @@ interface TTSOptions {
   onError?: (event?: SpeechSynthesisErrorEvent | Error) => void
 }
 
-interface PreloadedOpenAIAudio {
+interface SpeechAudioCacheEntry {
   key: string
   blob: Blob
+  bytes: number
+  played: boolean
 }
 
 const OPENAI_AUDIO_PRELOAD_LIMIT = 8
+/** 语音 blob 缓存字节预算：超出后先淘汰历史，再冻结新的预载 */
+const SPEECH_AUDIO_CACHE_BUDGET_BYTES = 64 * 1024 * 1024
+/** 已播放分片的保留数量，仅供「上一段」零等待重播 */
+const SPEECH_AUDIO_HISTORY_KEEP = 1
 
-export type SpeechProvider = 'system' | 'openai'
+export type SpeechProvider = 'system' | 'openai' | 'mimo'
 export type OpenAISpeechSource = 'browser' | 'server'
 export type OpenAISpeechFormat = 'mp3' | 'wav' | 'opus' | 'flac' | 'pcm'
 export type OpenAISpeechRequestMode = 'chunked' | 'merged'
+export type MimoSpeechSource = 'browser' | 'server'
+export type MimoSpeechFormat = 'wav' | 'mp3'
 
 interface SpeechConfig {
   provider: SpeechProvider
@@ -209,6 +227,13 @@ interface SpeechConfig {
   openaiVoice: string
   openaiFormat: OpenAISpeechFormat
   openaiRequestMode: OpenAISpeechRequestMode
+  mimoSource: MimoSpeechSource
+  mimoBaseUrl: string
+  mimoApiKey: string
+  mimoModel: string
+  mimoVoice: string
+  mimoFormat: MimoSpeechFormat
+  mimoPreloadCount: number
 }
 
 const defaultSpeechConfig: SpeechConfig = {
@@ -224,6 +249,13 @@ const defaultSpeechConfig: SpeechConfig = {
   openaiVoice: 'vivian',
   openaiFormat: 'mp3',
   openaiRequestMode: 'chunked',
+  mimoSource: 'browser',
+  mimoBaseUrl: DEFAULT_MIMO_BASE_URL,
+  mimoApiKey: '',
+  mimoModel: DEFAULT_MIMO_MODEL,
+  mimoVoice: DEFAULT_MIMO_VOICE,
+  mimoFormat: DEFAULT_MIMO_FORMAT,
+  mimoPreloadCount: MIMO_PRELOAD_DEFAULT,
 }
 
 function loadSpeechConfig(): SpeechConfig {
@@ -236,7 +268,7 @@ function loadSpeechConfig(): SpeechConfig {
 
 function migrateSpeechConfig(saved: Partial<SpeechConfig>): SpeechConfig {
   const merged = { ...defaultSpeechConfig, ...saved }
-  if (merged.provider !== 'system' && merged.provider !== 'openai') {
+  if (merged.provider !== 'system' && merged.provider !== 'openai' && merged.provider !== 'mimo') {
     merged.provider = defaultSpeechConfig.provider
   }
   if (merged.openaiSource !== 'browser' && merged.openaiSource !== 'server') {
@@ -248,6 +280,20 @@ function migrateSpeechConfig(saved: Partial<SpeechConfig>): SpeechConfig {
   if (merged.openaiRequestMode !== 'chunked' && merged.openaiRequestMode !== 'merged') {
     merged.openaiRequestMode = defaultSpeechConfig.openaiRequestMode
   }
+  if (merged.mimoSource !== 'browser' && merged.mimoSource !== 'server') {
+    merged.mimoSource = defaultSpeechConfig.mimoSource
+  }
+  if (merged.mimoFormat !== 'wav' && merged.mimoFormat !== 'mp3') {
+    merged.mimoFormat = defaultSpeechConfig.mimoFormat
+  }
+  merged.mimoBaseUrl = (merged.mimoBaseUrl || '').trim() || defaultSpeechConfig.mimoBaseUrl
+  merged.mimoApiKey = (merged.mimoApiKey || '').trim()
+  merged.mimoModel = (merged.mimoModel || '').trim() || defaultSpeechConfig.mimoModel
+  merged.mimoVoice = (merged.mimoVoice || '').trim() || defaultSpeechConfig.mimoVoice
+  merged.mimoPreloadCount = Math.min(
+    MIMO_PRELOAD_MAX,
+    Math.round(normalizeNumber(merged.mimoPreloadCount, MIMO_PRELOAD_DEFAULT, 1)),
+  )
   merged.speechRate = normalizeNumber(merged.speechRate, defaultSpeechConfig.speechRate, 0.5)
   merged.speechPitch = normalizeNumber(merged.speechPitch, defaultSpeechConfig.speechPitch, 0.5)
   merged.stopAfterMinutes = normalizeNumber(merged.stopAfterMinutes, defaultSpeechConfig.stopAfterMinutes, 0)
@@ -620,11 +666,20 @@ export const useReaderStore = defineStore('reader', () => {
   const systemTtsNativeEventsReliable = ref(false)
   const voiceList = ref<SpeechSynthesisVoice[]>([])
   const speechConfig = reactive<SpeechConfig>(loadSpeechConfig())
-  const openAISpeechConfigured = computed(() => {
+  const isNetworkSpeech = computed(() => speechConfig.provider !== 'system')
+  const networkSpeechConfigured = computed(() => {
+    if (speechConfig.provider === 'mimo') {
+      if (speechConfig.mimoSource === 'server') return true
+      return !!speechConfig.mimoBaseUrl.trim()
+    }
     if (speechConfig.openaiSource === 'server') return true
     return !!speechConfig.openaiBaseUrl.trim()
   })
-  const speechProviderLabel = computed(() => speechConfig.provider === 'openai' ? 'OpenAI Speech' : '系统语音')
+  const speechProviderLabel = computed(() => {
+    if (speechConfig.provider === 'openai') return 'OpenAI Speech'
+    if (speechConfig.provider === 'mimo') return 'MiMo TTS'
+    return '系统语音'
+  })
   const speechStopAt = ref(0)
   let speechStopTimer: number | null = null
   let synth: SpeechSynthesis | null = typeof window !== 'undefined' ? window.speechSynthesis : null
@@ -632,7 +687,8 @@ export const useReaderStore = defineStore('reader', () => {
   let currentOpenAIAudio: HTMLAudioElement | null = null
   let currentOpenAIAudioUrl = ''
   let currentOpenAIAbortController: AbortController | null = null
-  const preloadedOpenAIAudio = ref<PreloadedOpenAIAudio[]>([])
+  const speechAudioCache = ref<SpeechAudioCacheEntry[]>([])
+  let currentSpeechAudioKey = ''
   let preloadGeneration = 0
   const inFlightPreloadKeys = new Set<string>()
   const inFlightOpenAIAudioRequests = new Map<string, Promise<Blob>>()
@@ -693,55 +749,100 @@ export const useReaderStore = defineStore('reader', () => {
 
   function setSpeechProvider(provider: SpeechProvider) {
     speechConfig.provider = provider
-    clearPreloadedOpenAIAudio()
+    clearPreloadedSpeechAudio()
+    saveSpeechConfig()
+  }
+
+  function setMimoSpeechSource(source: MimoSpeechSource) {
+    speechConfig.mimoSource = source
+    clearPreloadedSpeechAudio()
+    saveSpeechConfig()
+  }
+
+  function setMimoSpeechBaseUrl(url: string) {
+    speechConfig.mimoBaseUrl = url.trim()
+    clearPreloadedSpeechAudio()
+    saveSpeechConfig()
+  }
+
+  function setMimoSpeechApiKey(apiKey: string) {
+    speechConfig.mimoApiKey = apiKey.trim()
+    clearPreloadedSpeechAudio()
+    saveSpeechConfig()
+  }
+
+  function setMimoSpeechModel(model: string) {
+    speechConfig.mimoModel = model.trim()
+    clearPreloadedSpeechAudio()
+    saveSpeechConfig()
+  }
+
+  function setMimoSpeechVoice(voice: string) {
+    speechConfig.mimoVoice = voice.trim()
+    clearPreloadedSpeechAudio()
+    saveSpeechConfig()
+  }
+
+  function setMimoSpeechFormat(format: MimoSpeechFormat) {
+    speechConfig.mimoFormat = format
+    clearPreloadedSpeechAudio()
+    saveSpeechConfig()
+  }
+
+  function setMimoPreloadCount(count: number) {
+    const normalized = Math.round(Number(count))
+    speechConfig.mimoPreloadCount = Number.isFinite(normalized)
+      ? Math.min(MIMO_PRELOAD_MAX, Math.max(1, normalized))
+      : MIMO_PRELOAD_DEFAULT
+    clearPreloadedSpeechAudio()
     saveSpeechConfig()
   }
 
   function setOpenAISpeechBaseUrl(url: string) {
     speechConfig.openaiBaseUrl = url.trim()
-    clearPreloadedOpenAIAudio()
+    clearPreloadedSpeechAudio()
     saveSpeechConfig()
   }
 
   function setOpenAISpeechSource(source: OpenAISpeechSource) {
     speechConfig.openaiSource = source
-    clearPreloadedOpenAIAudio()
+    clearPreloadedSpeechAudio()
     saveSpeechConfig()
   }
 
   function setOpenAISpeechApiKey(apiKey: string) {
     speechConfig.openaiApiKey = apiKey.trim()
-    clearPreloadedOpenAIAudio()
+    clearPreloadedSpeechAudio()
     saveSpeechConfig()
   }
 
   function setOpenAISpeechModel(model: string) {
     speechConfig.openaiModel = model
-    clearPreloadedOpenAIAudio()
+    clearPreloadedSpeechAudio()
     saveSpeechConfig()
   }
 
   function setOpenAISpeechVoice(voice: string) {
     speechConfig.openaiVoice = voice
-    clearPreloadedOpenAIAudio()
+    clearPreloadedSpeechAudio()
     saveSpeechConfig()
   }
 
   function setOpenAISpeechFormat(format: OpenAISpeechFormat) {
     speechConfig.openaiFormat = format
-    clearPreloadedOpenAIAudio()
+    clearPreloadedSpeechAudio()
     saveSpeechConfig()
   }
 
   function setOpenAISpeechRequestMode(mode: OpenAISpeechRequestMode) {
     speechConfig.openaiRequestMode = mode
-    clearPreloadedOpenAIAudio()
+    clearPreloadedSpeechAudio()
     saveSpeechConfig()
   }
 
   function setSpeechRate(rate: number) {
     speechConfig.speechRate = rate
-    clearPreloadedOpenAIAudio()
+    clearPreloadedSpeechAudio()
     saveSpeechConfig()
   }
 
@@ -750,7 +851,19 @@ export const useReaderStore = defineStore('reader', () => {
     saveSpeechConfig()
   }
 
-  function buildOpenAIAudioCacheKey(rawText: string) {
+  function buildSpeechAudioCacheKey(rawText: string) {
+    if (speechConfig.provider === 'mimo') {
+      return [
+        'mimo',
+        speechConfig.mimoSource,
+        speechConfig.mimoBaseUrl.trim(),
+        speechConfig.mimoApiKey.trim(),
+        speechConfig.mimoModel,
+        speechConfig.mimoVoice,
+        speechConfig.mimoFormat,
+        rawText,
+      ].join('::')
+    }
     return [
       speechConfig.openaiSource,
       speechConfig.openaiBaseUrl.trim(),
@@ -763,7 +876,19 @@ export const useReaderStore = defineStore('reader', () => {
     ].join('::')
   }
 
-  async function fetchOpenAIAudioBlob(rawText: string, signal?: AbortSignal) {
+  async function fetchSpeechAudioBlob(rawText: string, signal?: AbortSignal) {
+    if (speechConfig.provider === 'mimo') {
+      return requestMimoSpeechAudio({
+        source: speechConfig.mimoSource,
+        baseUrl: speechConfig.mimoBaseUrl,
+        apiKey: speechConfig.mimoApiKey || undefined,
+        input: rawText.slice(0, MIMO_MAX_CHUNK_CHARS),
+        model: speechConfig.mimoModel,
+        voice: speechConfig.mimoVoice,
+        format: speechConfig.mimoFormat,
+        signal,
+      })
+    }
     return requestOpenAISpeechAudio({
       source: speechConfig.openaiSource,
       baseUrl: speechConfig.openaiBaseUrl,
@@ -777,14 +902,14 @@ export const useReaderStore = defineStore('reader', () => {
     })
   }
 
-  function getOrStartOpenAIAudioRequest(rawText: string, signal?: AbortSignal) {
-    const key = buildOpenAIAudioCacheKey(rawText)
+  function getOrStartSpeechAudioRequest(rawText: string, signal?: AbortSignal) {
+    const key = buildSpeechAudioCacheKey(rawText)
     const existing = inFlightOpenAIAudioRequests.get(key)
     if (existing) {
       return { key, promise: existing }
     }
 
-    const promise = fetchOpenAIAudioBlob(rawText, signal).finally(() => {
+    const promise = fetchSpeechAudioBlob(rawText, signal).finally(() => {
       if (inFlightOpenAIAudioRequests.get(key) === promise) {
         inFlightOpenAIAudioRequests.delete(key)
       }
@@ -793,35 +918,114 @@ export const useReaderStore = defineStore('reader', () => {
     return { key, promise }
   }
 
-  function clearPreloadedOpenAIAudio() {
-    preloadGeneration += 1
-    inFlightPreloadKeys.clear()
-    inFlightOpenAIAudioRequests.clear()
-    preloadedOpenAIAudio.value = []
+  function maxReadySpeechAudioCount() {
+    if (speechConfig.provider === 'mimo') {
+      return Math.min(MIMO_PRELOAD_MAX, Math.max(1, Math.round(speechConfig.mimoPreloadCount)))
+    }
+    return OPENAI_AUDIO_PRELOAD_LIMIT
   }
 
-  async function preloadOpenAITTS(rawText?: string | string[] | null) {
-    if (speechConfig.provider !== 'openai' || !openAISpeechConfigured.value) return
+  /**
+   * 缓存淘汰：已播放片只留 SPEECH_AUDIO_HISTORY_KEEP 片（供「上一段」重播），
+   * 未消费片不超过预载深度，整体不超过字节预算；正在播放的一片永不淘汰。
+   */
+  function enforceSpeechAudioCacheLimits() {
+    const entries = speechAudioCache.value
+    if (!entries.length) return
+
+    const kept: SpeechAudioCacheEntry[] = []
+    const playedEntries = entries.filter((entry) => entry.played && entry.key !== currentSpeechAudioKey)
+    const keptHistory = playedEntries.slice(-SPEECH_AUDIO_HISTORY_KEEP)
+    const readyLimit = maxReadySpeechAudioCount()
+
+    let readyCount = 0
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index]
+      if (entry.key === currentSpeechAudioKey) {
+        kept.push(entry)
+        continue
+      }
+      if (entry.played) {
+        if (keptHistory.includes(entry)) kept.push(entry)
+        continue
+      }
+      if (readyCount < readyLimit) {
+        readyCount += 1
+        kept.push(entry)
+      }
+    }
+
+    kept.reverse()
+    let totalBytes = kept.reduce((sum, entry) => sum + entry.bytes, 0)
+    while (totalBytes > SPEECH_AUDIO_CACHE_BUDGET_BYTES && kept.length > 1) {
+      const dropIndex = kept.findIndex((entry) => entry.key !== currentSpeechAudioKey)
+      if (dropIndex < 0) break
+      totalBytes -= kept[dropIndex].bytes
+      kept.splice(dropIndex, 1)
+    }
+    speechAudioCache.value = kept
+  }
+
+  function touchSpeechAudioEntry(key: string) {
+    const index = speechAudioCache.value.findIndex((entry) => entry.key === key)
+    if (index < 0) return
+    const entry = speechAudioCache.value[index]
+    if (index === speechAudioCache.value.length - 1) return
+    speechAudioCache.value = [
+      ...speechAudioCache.value.slice(0, index),
+      ...speechAudioCache.value.slice(index + 1),
+      entry,
+    ]
+  }
+
+  function markSpeechAudioPlayed(key: string) {
+    const entry = speechAudioCache.value.find((item) => item.key === key)
+    if (!entry || entry.played) return
+    entry.played = true
+    enforceSpeechAudioCacheLimits()
+  }
+
+  function setCurrentSpeechAudioKey(key: string) {
+    currentSpeechAudioKey = key
+  }
+
+  /** 该文本是否已有就绪音频（预载/历史缓存）；MiMo 快速启动用它判断是否需要小片提速 */
+  function hasSpeechAudio(rawText: string) {
+    const key = buildSpeechAudioCacheKey(rawText)
+    return speechAudioCache.value.some((entry) => entry.key === key)
+  }
+
+  function clearPreloadedSpeechAudio() {
+    preloadGeneration += 1
+    currentSpeechAudioKey = ''
+    inFlightPreloadKeys.clear()
+    inFlightOpenAIAudioRequests.clear()
+    speechAudioCache.value = []
+  }
+
+  async function preloadSpeechAudio(rawText?: string | string[] | null) {
+    if (!isNetworkSpeech.value || !networkSpeechConfigured.value) return
     const texts = Array.isArray(rawText) ? rawText : [rawText || '']
     const normalizedTexts = texts.map((item) => item.trim()).filter(Boolean)
     if (!normalizedTexts.length) return
     const pendingTexts = normalizedTexts.filter((item) => {
-      const key = buildOpenAIAudioCacheKey(item)
-      return !preloadedOpenAIAudio.value.some((entry) => entry.key === key) && !inFlightPreloadKeys.has(key)
+      const key = buildSpeechAudioCacheKey(item)
+      return !speechAudioCache.value.some((entry) => entry.key === key) && !inFlightPreloadKeys.has(key)
     })
     if (!pendingTexts.length) return
 
     const generation = preloadGeneration
-    for (const text of pendingTexts.slice(0, OPENAI_AUDIO_PRELOAD_LIMIT)) {
-      const key = buildOpenAIAudioCacheKey(text)
+    for (const text of pendingTexts.slice(0, maxReadySpeechAudioCount())) {
+      const key = buildSpeechAudioCacheKey(text)
       inFlightPreloadKeys.add(key)
-      const { promise } = getOrStartOpenAIAudioRequest(text)
+      const { promise } = getOrStartSpeechAudioRequest(text)
       void promise
         .then((blob) => {
           if (generation !== preloadGeneration) return
-          const nextQueue = preloadedOpenAIAudio.value.filter((entry) => entry.key !== key)
-          nextQueue.push({ key, blob })
-          preloadedOpenAIAudio.value = nextQueue
+          const nextQueue = speechAudioCache.value.filter((entry) => entry.key !== key)
+          nextQueue.push({ key, blob, bytes: blob.size, played: false })
+          speechAudioCache.value = nextQueue
+          enforceSpeechAudioCacheLimits()
         })
         .catch(() => undefined)
         .finally(() => {
@@ -831,6 +1035,10 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function stopOpenAIAudioPlayback() {
+    if (currentSpeechAudioKey) {
+      markSpeechAudioPlayed(currentSpeechAudioKey)
+      currentSpeechAudioKey = ''
+    }
     if (currentOpenAIAbortController) {
       currentOpenAIAbortController.abort()
       currentOpenAIAbortController = null
@@ -1066,13 +1274,17 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   async function startOpenAITTS(rawText: string, options: TTSOptions, sessionId: number) {
-    if (!openAISpeechConfigured.value) {
-      const error = new Error('请先配置 OpenAI Speech')
+    const providerLabel = speechConfig.provider === 'mimo' ? 'MiMo TTS' : 'OpenAI Speech'
+    if (!networkSpeechConfigured.value) {
+      const error = new Error(`请先配置 ${providerLabel}`)
       appStore.showToast(error.message, 'warning')
       options.onError?.(error)
       return
     }
-    if (speechConfig.openaiSource === 'server') {
+    const usesServerConfig = speechConfig.provider === 'mimo'
+      ? speechConfig.mimoSource === 'server'
+      : speechConfig.openaiSource === 'server'
+    if (usesServerConfig) {
       const serverConfig = await aiBookStore.loadServerModelConfig()
       if (!serverConfig?.canUseServerModel) {
         const error = new Error('当前账号没有使用后端模型配置的权限')
@@ -1081,7 +1293,7 @@ export const useReaderStore = defineStore('reader', () => {
         return
       }
       if (!serverConfig.config.speech.enabled) {
-        const error = new Error('后端 OpenAI Speech 未启用')
+        const error = new Error(`后端 ${providerLabel} 未启用`)
         appStore.showToast(error.message, 'warning')
         options.onError?.(error)
         return
@@ -1109,6 +1321,7 @@ export const useReaderStore = defineStore('reader', () => {
         if (!isCurrentTTSSession(sessionId) || currentOpenAIAudio !== audio) return
         isSpeaking.value = true
         isPaused.value = false
+        setCurrentSpeechAudioKey(key)
         logTTS('openai onplay', { sessionId, text: rawText.slice(0, 40) })
         options.onStart?.()
       }
@@ -1128,6 +1341,8 @@ export const useReaderStore = defineStore('reader', () => {
         if (!isCurrentTTSSession(sessionId)) return
         isSpeaking.value = false
         isPaused.value = false
+        markSpeechAudioPlayed(key)
+        if (currentSpeechAudioKey === key) currentSpeechAudioKey = ''
         logTTS('openai onended', { sessionId, text: rawText.slice(0, 40) })
         if (currentOpenAIAudioUrl) {
           URL.revokeObjectURL(currentOpenAIAudioUrl)
@@ -1162,9 +1377,10 @@ export const useReaderStore = defineStore('reader', () => {
     const controller = new AbortController()
     currentOpenAIAbortController = controller
 
-    const key = buildOpenAIAudioCacheKey(rawText)
-    const cached = preloadedOpenAIAudio.value.find((entry) => entry.key === key)
+    const key = buildSpeechAudioCacheKey(rawText)
+    const cached = speechAudioCache.value.find((entry) => entry.key === key)
     if (cached) {
+      touchSpeechAudioEntry(key)
       void Promise.resolve(playBlob(cached.blob, controller))
       return
     }
@@ -1186,7 +1402,7 @@ export const useReaderStore = defineStore('reader', () => {
       return
     }
 
-    const started = getOrStartOpenAIAudioRequest(rawText, controller.signal)
+    const started = getOrStartSpeechAudioRequest(rawText, controller.signal)
     void started.promise.then((blob) => {
       return playBlob(blob, controller)
     }).catch((error: Error) => {
@@ -1237,7 +1453,7 @@ export const useReaderStore = defineStore('reader', () => {
       }
     }
 
-    if (speechConfig.provider === 'openai') {
+    if (isNetworkSpeech.value) {
       void startOpenAITTS(rawText, options, sessionId)
       return
     }
@@ -1246,7 +1462,7 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function pauseTTS() {
-    if (speechConfig.provider === 'openai') {
+    if (isNetworkSpeech.value) {
       if (!currentOpenAIAudio) return
       if (currentOpenAIAudio.paused) {
         void currentOpenAIAudio.play()
@@ -1287,6 +1503,9 @@ export const useReaderStore = defineStore('reader', () => {
     isSpeaking.value = false
     isPaused.value = false
     if (resetCallbacks) {
+      // 用户主动停止：连预载和历史缓存一起清掉；stopTTS(false) 是换片内部的
+      // 打断，必须保留缓存，否则预载白做。
+      clearPreloadedSpeechAudio()
       clearSpeechStopTimer()
     }
   }
@@ -1721,10 +1940,13 @@ export const useReaderStore = defineStore('reader', () => {
     switchSource, preloadNextChapter, preloadAroundChapter,
     refreshChapters,
     isSpeaking, isSpeechLoading, isPaused, startTTS, pauseTTS, stopTTS,
-    voiceList, speechConfig, speechStopAt, speechProviderLabel, openAISpeechConfigured,
+    voiceList, speechConfig, speechStopAt, speechProviderLabel, networkSpeechConfigured,
     systemTtsNativeEventsReliable,
     fetchVoices, setVoiceName, setSpeechProvider, setSpeechRate, setSpeechPitch, setSpeechStopTimer, clearSpeechStopTimer,
-    setOpenAISpeechSource, setOpenAISpeechBaseUrl, setOpenAISpeechApiKey, setOpenAISpeechModel, setOpenAISpeechVoice, setOpenAISpeechFormat, setOpenAISpeechRequestMode, preloadOpenAITTS,
+    setOpenAISpeechSource, setOpenAISpeechBaseUrl, setOpenAISpeechApiKey, setOpenAISpeechModel, setOpenAISpeechVoice, setOpenAISpeechFormat, setOpenAISpeechRequestMode,
+    setMimoSpeechSource, setMimoSpeechBaseUrl, setMimoSpeechApiKey, setMimoSpeechModel, setMimoSpeechVoice, setMimoSpeechFormat, setMimoPreloadCount,
+    preloadSpeechAudio,
+    hasSpeechAudio,
     displayContent, processContentForDisplay,
     isAutoScrolling,
   }
