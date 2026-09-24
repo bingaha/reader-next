@@ -25,6 +25,7 @@ import {
   DEFAULT_MIMO_BASE_URL,
   DEFAULT_MIMO_FORMAT,
   DEFAULT_MIMO_MODEL,
+  DEFAULT_MIMO_STYLE,
   DEFAULT_MIMO_VOICE,
   MIMO_PRELOAD_DEFAULT,
   MIMO_PRELOAD_MAX,
@@ -233,6 +234,7 @@ interface SpeechConfig {
   mimoModel: string
   mimoVoice: string
   mimoFormat: MimoSpeechFormat
+  mimoStyle: string
   mimoPreloadCount: number
 }
 
@@ -255,6 +257,7 @@ const defaultSpeechConfig: SpeechConfig = {
   mimoModel: DEFAULT_MIMO_MODEL,
   mimoVoice: DEFAULT_MIMO_VOICE,
   mimoFormat: DEFAULT_MIMO_FORMAT,
+  mimoStyle: DEFAULT_MIMO_STYLE,
   mimoPreloadCount: MIMO_PRELOAD_DEFAULT,
 }
 
@@ -290,6 +293,10 @@ function migrateSpeechConfig(saved: Partial<SpeechConfig>): SpeechConfig {
   merged.mimoApiKey = (merged.mimoApiKey || '').trim()
   merged.mimoModel = (merged.mimoModel || '').trim() || defaultSpeechConfig.mimoModel
   merged.mimoVoice = (merged.mimoVoice || '').trim() || defaultSpeechConfig.mimoVoice
+  // 允许空串（=不附加风格）；仅类型非法时回填默认
+  if (typeof merged.mimoStyle !== 'string') {
+    merged.mimoStyle = defaultSpeechConfig.mimoStyle
+  }
   merged.mimoPreloadCount = Math.min(
     MIMO_PRELOAD_MAX,
     Math.round(normalizeNumber(merged.mimoPreloadCount, MIMO_PRELOAD_DEFAULT, 1)),
@@ -783,6 +790,12 @@ export const useReaderStore = defineStore('reader', () => {
     saveSpeechConfig()
   }
 
+  function setMimoSpeechStyle(style: string) {
+    speechConfig.mimoStyle = style
+    clearPreloadedSpeechAudio()
+    saveSpeechConfig()
+  }
+
   function setMimoSpeechFormat(format: MimoSpeechFormat) {
     speechConfig.mimoFormat = format
     clearPreloadedSpeechAudio()
@@ -861,6 +874,7 @@ export const useReaderStore = defineStore('reader', () => {
         speechConfig.mimoModel,
         speechConfig.mimoVoice,
         speechConfig.mimoFormat,
+        speechConfig.mimoStyle,
         rawText,
       ].join('::')
     }
@@ -886,6 +900,7 @@ export const useReaderStore = defineStore('reader', () => {
         model: speechConfig.mimoModel,
         voice: speechConfig.mimoVoice,
         format: speechConfig.mimoFormat,
+        style: speechConfig.mimoStyle,
         signal,
       })
     }
@@ -1944,7 +1959,7 @@ export const useReaderStore = defineStore('reader', () => {
     systemTtsNativeEventsReliable,
     fetchVoices, setVoiceName, setSpeechProvider, setSpeechRate, setSpeechPitch, setSpeechStopTimer, clearSpeechStopTimer,
     setOpenAISpeechSource, setOpenAISpeechBaseUrl, setOpenAISpeechApiKey, setOpenAISpeechModel, setOpenAISpeechVoice, setOpenAISpeechFormat, setOpenAISpeechRequestMode,
-    setMimoSpeechSource, setMimoSpeechBaseUrl, setMimoSpeechApiKey, setMimoSpeechModel, setMimoSpeechVoice, setMimoSpeechFormat, setMimoPreloadCount,
+    setMimoSpeechSource, setMimoSpeechBaseUrl, setMimoSpeechApiKey, setMimoSpeechModel, setMimoSpeechVoice, setMimoSpeechStyle, setMimoSpeechFormat, setMimoPreloadCount,
     preloadSpeechAudio,
     hasSpeechAudio,
     displayContent, processContentForDisplay,

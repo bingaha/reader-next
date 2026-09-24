@@ -28,20 +28,32 @@
           {{ voice.name }} ({{ voice.lang }})
         </option>
       </select>
-      <div v-else-if="openaiSource === 'server'" class="tts-source-note">
-        OpenAI Speech 使用后端配置
-      </div>
-      <div v-else-if="mimoSource === 'server'" class="tts-source-note">
-        MiMo TTS 使用后端配置
-      </div>
-      <input
-        v-else
-        class="tts-voice-select"
-        type="text"
-        :value="openaiVoice"
-        placeholder="alloy"
-        @input="$emit('openai-voice-change', ($event.target as HTMLInputElement).value)"
-      >
+      <template v-else-if="provider === 'mimo'">
+        <div v-if="mimoSource === 'server'" class="tts-source-note">
+          MiMo TTS 使用后端配置
+        </div>
+        <select
+          v-else
+          class="tts-voice-select"
+          :value="mimoVoice"
+          @change="$emit('mimo-voice-change', ($event.target as HTMLSelectElement).value)"
+        >
+          <option v-for="voice in mimoVoiceOptions" :key="voice" :value="voice">{{ voice }}</option>
+        </select>
+      </template>
+      <template v-else>
+        <div v-if="openaiSource === 'server'" class="tts-source-note">
+          OpenAI Speech 使用后端配置
+        </div>
+        <input
+          v-else
+          class="tts-voice-select"
+          type="text"
+          :value="openaiVoice"
+          placeholder="alloy"
+          @input="$emit('openai-voice-change', ($event.target as HTMLInputElement).value)"
+        >
+      </template>
       <div v-if="provider !== 'mimo'" class="tts-tuning">
         <div class="tts-stepper">
           <span class="tts-label">语速</span>
@@ -72,6 +84,9 @@
 
 <script setup lang="ts">
 import type { ThemePreset } from '../../stores/reader'
+import { MIMO_VOICES } from '../../utils/mimoSpeech'
+
+const mimoVoiceOptions = MIMO_VOICES
 
 defineProps<{
   show: boolean
@@ -105,6 +120,7 @@ defineEmits<{
   next: []
   'voice-change': [value: string]
   'openai-voice-change': [value: string]
+  'mimo-voice-change': [value: string]
   'rate-change': [delta: number]
   'pitch-change': [delta: number]
   'timer-change': [minutes: number]

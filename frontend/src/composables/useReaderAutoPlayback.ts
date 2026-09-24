@@ -330,6 +330,15 @@ export function useReaderAutoPlayback(
     paragraphs.forEach((paragraph) => paragraph.classList.add('reading'))
   }
 
+  /**
+   * 恢复播放时补回高亮：暂停/换片过渡窗口里（onEnd 间隙 isPaused=false）
+   * 高亮可能已被清掉，恢复播放本身不会重新 mark，需要自愈。
+   */
+  function ensureReadingHighlight() {
+    if (scrollContainerRef.value?.querySelector('.reading')) return
+    markReadingParagraph(getCurrentParagraph())
+  }
+
   /* ─── MiMo 分片播放 ─── */
 
   function isMimoSpeech() {
@@ -909,6 +918,7 @@ export function useReaderAutoPlayback(
   return {
     getCurrentParagraph,
     clearReadingClass,
+    ensureReadingHighlight,
     startAutoScroll,
     stopAutoScroll,
     startSpeech,

@@ -40,6 +40,7 @@ vi.mock('../utils/mimoSpeech', () => ({
   DEFAULT_MIMO_BASE_URL: 'https://api.xiaomimimo.com/v1',
   DEFAULT_MIMO_FORMAT: 'mp3',
   DEFAULT_MIMO_MODEL: 'mimo-v2.5-tts',
+  DEFAULT_MIMO_STYLE: '评书说书人，声情并茂的讲述故事的语气，语速稍快。',
   DEFAULT_MIMO_VOICE: '冰糖',
   MIMO_PRELOAD_DEFAULT: 2,
   MIMO_PRELOAD_MAX: 10,
@@ -86,6 +87,7 @@ describe('reader mimo speech config', () => {
     expect(store.speechConfig.mimoVoice).toBe('冰糖')
     expect(store.speechConfig.mimoFormat).toBe('mp3')
     expect(store.speechConfig.mimoPreloadCount).toBe(2)
+    expect(store.speechConfig.mimoStyle).toBe('评书说书人，声情并茂的讲述故事的语气，语速稍快。')
     expect(store.networkSpeechConfigured).toBe(true)
   })
 
@@ -120,6 +122,7 @@ describe('reader mimo speech config', () => {
         mimoPreloadCount: 99,
         mimoBaseUrl: '   ',
         mimoVoice: '',
+        mimoStyle: 123,
       }),
     })
     const store = useStore()
@@ -128,6 +131,22 @@ describe('reader mimo speech config', () => {
     expect(store.speechConfig.mimoPreloadCount).toBe(10)
     expect(store.speechConfig.mimoBaseUrl).toBe('https://api.xiaomimimo.com/v1')
     expect(store.speechConfig.mimoVoice).toBe('冰糖')
+    expect(store.speechConfig.mimoStyle).toBe('评书说书人，声情并茂的讲述故事的语气，语速稍快。')
+  })
+
+  it('keeps empty mimo style (style disabled) when persisted as empty string', () => {
+    installLocalStorage({
+      'reader-speechConfig': JSON.stringify({
+        provider: 'mimo',
+        mimoStyle: '',
+      }),
+    })
+    const store = useStore()
+    expect(store.speechConfig.mimoStyle).toBe('')
+    store.setMimoSpeechStyle('冷静的新闻播报，语速平缓。')
+    expect(store.speechConfig.mimoStyle).toBe('冷静的新闻播报，语速平缓。')
+    store.setMimoSpeechStyle('')
+    expect(store.speechConfig.mimoStyle).toBe('')
   })
 
   it('clamps mimo preload count setter', () => {
@@ -190,6 +209,34 @@ describe('reader mimo speech playback', () => {
       model: 'mimo-v2.5-tts',
       voice: '茉莉',
       format: 'wav',
+      style: '评书说书人，声情并茂的讲述故事的语气，语速稍快。',
+    }))
+  })
+
+  it('sends edited style and bypasses cache after style change', async () => {
+    const store = useStore()
+    store.setSpeechProvider('mimo')
+    store.setMimoSpeechStyle('冷静的新闻播报，语速平缓。')
+
+    vi.mocked(requestMimoSpeechAudio).mockResolvedValue(
+      new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/mpeg' }),
+    )
+
+    await new Promise<void>((resolve) => {
+      store.startTTS('待合成文本', { onStart: () => resolve() })
+    })
+    expect(requestMimoSpeechAudio).toHaveBeenCalledWith(expect.objectContaining({
+      style: '冷静的新闻播报，语速平缓。',
+    }))
+
+    // 风格改动后旧缓存失效：同一文本重新请求
+    store.setMimoSpeechStyle('')
+    vi.mocked(requestMimoSpeechAudio).mockClear()
+    await new Promise<void>((resolve) => {
+      store.startTTS('待合成文本', { onStart: () => resolve() })
+    })
+    expect(requestMimoSpeechAudio).toHaveBeenCalledWith(expect.objectContaining({
+      style: '',
     }))
   })
 

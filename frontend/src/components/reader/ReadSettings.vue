@@ -321,6 +321,24 @@
         </div>
 
         <div class="setting-row setting-row-top">
+          <label>风格提示词</label>
+          <div class="style-prompt-wrap">
+            <textarea
+              class="style-prompt"
+              rows="3"
+              :value="store.speechConfig.mimoStyle"
+              placeholder="留空则不附加风格，按音色默认表现朗读"
+              @input="store.setMimoSpeechStyle(($event.target as HTMLTextAreaElement).value)"
+            ></textarea>
+            <button class="style-reset-btn" @click="store.setMimoSpeechStyle(defaultMimoStyle)">恢复默认风格</button>
+          </div>
+        </div>
+
+        <div class="setting-hint">
+          用自然语言描述朗读风格（角色、语气、语速、情绪等），每次合成随请求下发；留空则不生效。
+        </div>
+
+        <div class="setting-row setting-row-top">
           <label>预载分片数</label>
           <div class="stepper">
             <button class="step-btn" :disabled="store.speechConfig.mimoPreloadCount <= 1" @click="store.setMimoPreloadCount(store.speechConfig.mimoPreloadCount - 1)">—</button>
@@ -506,7 +524,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useReaderStore, themePresets, fontPresets } from '../../stores/reader'
 import { useAiBookStore } from '../../stores/aiBook'
 import { useAppStore } from '../../stores/app'
-import { MIMO_VOICES } from '../../utils/mimoSpeech'
+import { MIMO_VOICES, DEFAULT_MIMO_STYLE } from '../../utils/mimoSpeech'
 
 const store = useReaderStore()
 const aiBookStore = useAiBookStore()
@@ -516,6 +534,7 @@ const theme = computed(() => store.currentTheme)
 const serverModelLoaded = ref(false)
 const canUseServerModel = computed(() => Boolean(aiBookStore.serverModelConfig?.canUseServerModel))
 const mimoVoices = MIMO_VOICES
+const defaultMimoStyle = DEFAULT_MIMO_STYLE
 
 function step(key: 'fontSize' | 'fontWeight' | 'pageWidth' | 'animateDuration' | 'scrollPixel' | 'pageSpeed', delta: number, min: number, max: number) {
   const val = Math.max(min, Math.min(max, (config.value[key] as number) + delta))
@@ -675,6 +694,52 @@ onMounted(async () => {
   border: 1px solid rgba(0, 0, 0, 0.08);
   background: rgba(255, 255, 255, 0.6);
   color: inherit;
+}
+
+.style-prompt-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.style-prompt {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: rgba(255, 255, 255, 0.6);
+  color: inherit;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 64px;
+}
+
+.style-prompt:focus {
+  outline: none;
+  border-color: var(--color-primary, #c97f3a);
+}
+
+.style-reset-btn {
+  padding: 5px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.style-reset-btn:hover {
+  opacity: 1;
+  border-color: var(--color-primary, #c97f3a);
+  color: var(--color-primary, #c97f3a);
 }
 
 .setting-hint {
@@ -842,6 +907,11 @@ onMounted(async () => {
   .voice-select,
   .theme-swatches {
     flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .style-prompt-wrap {
     min-width: 0;
     max-width: 100%;
   }

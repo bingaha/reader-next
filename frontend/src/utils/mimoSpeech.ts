@@ -4,6 +4,8 @@ export const DEFAULT_MIMO_BASE_URL = 'https://api.xiaomimimo.com/v1'
 export const DEFAULT_MIMO_MODEL = 'mimo-v2.5-tts'
 export const DEFAULT_MIMO_VOICE = '冰糖'
 export const DEFAULT_MIMO_FORMAT = 'mp3'
+/** 默认朗读风格（自然语言指令，经 role:user 消息下发；置空则不附加风格） */
+export const DEFAULT_MIMO_STYLE = '评书说书人，声情并茂的讲述故事的语气，语速稍快。'
 export const MIMO_SPEECH_PATH = '/v1/chat/completions'
 
 export const MIMO_VOICES = [
@@ -38,6 +40,8 @@ export interface MimoSpeechRequest {
   model: string
   voice: string
   format?: MimoAudioFormat
+  /** 自然语言风格指令（语速/情绪/腔调等），空或全空白则不下发 */
+  style?: string
   signal?: AbortSignal
 }
 
@@ -71,11 +75,17 @@ export function buildMimoSpeechBody({
   model,
   voice,
   format,
-}: Pick<MimoSpeechRequest, 'input' | 'model' | 'voice' | 'format'>) {
+  style,
+}: Pick<MimoSpeechRequest, 'input' | 'model' | 'voice' | 'format' | 'style'>) {
+  // MiMo 文档：目标文本放 role:assistant，风格指令放 role:user（可选）
+  const stylePrompt = style?.trim() || ''
   return {
     model,
     stream: false,
-    messages: [{ role: 'assistant', content: input }],
+    messages: [
+      ...(stylePrompt ? [{ role: 'user', content: stylePrompt }] : []),
+      { role: 'assistant', content: input },
+    ],
     audio: {
       format: format || DEFAULT_MIMO_FORMAT,
       voice,

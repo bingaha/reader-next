@@ -71,6 +71,31 @@ describe('buildMimoSpeechBody', () => {
     expect(body).not.toHaveProperty('speed')
     expect(body).not.toHaveProperty('response_format')
   })
+
+  it('prepends user style message when style provided', () => {
+    const body = buildMimoSpeechBody({
+      input: '待合成文本',
+      model: 'mimo-v2.5-tts',
+      voice: '冰糖',
+      format: 'mp3',
+      style: '评书说书人，声情并茂的讲述故事的语气，语速稍快。',
+    })
+    expect(body.messages).toEqual([
+      { role: 'user', content: '评书说书人，声情并茂的讲述故事的语气，语速稍快。' },
+      { role: 'assistant', content: '待合成文本' },
+    ])
+  })
+
+  it('treats blank style as no style instruction', () => {
+    const body = buildMimoSpeechBody({
+      input: '待合成文本',
+      model: 'mimo-v2.5-tts',
+      voice: '冰糖',
+      format: 'mp3',
+      style: '   ',
+    })
+    expect(body.messages).toEqual([{ role: 'assistant', content: '待合成文本' }])
+  })
 })
 
 describe('buildMimoSpeechUrl', () => {

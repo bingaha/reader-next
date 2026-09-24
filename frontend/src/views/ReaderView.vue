@@ -102,6 +102,7 @@
       @next="speechNext"
       @voice-change="changeVoice"
       @openai-voice-change="changeOpenAIVoice"
+      @mimo-voice-change="changeMimoVoice"
       @rate-change="adjustSpeechRate"
       @pitch-change="adjustSpeechPitch"
       @timer-change="setSpeechTimer"
@@ -2271,6 +2272,7 @@ function scheduleRestoreReadingPosition() {
 
 const {
   clearReadingClass,
+  ensureReadingHighlight,
   startAutoScroll,
   stopAutoScroll,
   startSpeech,
@@ -2679,6 +2681,10 @@ function toggleSpeechFromPanel() {
   if (store.isPaused || store.isSpeaking) {
     cancelSpeechTransition()
     store.pauseTTS()
+    // 暂停期间高亮可能被清（换片过渡间隙），恢复后补回当前段高亮
+    if (store.isSpeaking && !store.isPaused) {
+      ensureReadingHighlight()
+    }
     return
   }
   startSpeech()
@@ -2711,6 +2717,16 @@ function changeVoice(name: string) {
 function changeOpenAIVoice(voiceId: string) {
   if (store.speechConfig.openaiSource === 'server') return
   store.setOpenAISpeechVoice(voiceId)
+  ttsPanelDismissed.value = false
+  showTTSPanel.value = true
+  if (store.isSpeaking && !store.isPaused) {
+    restartSpeechFromCurrentParagraph()
+  }
+}
+
+function changeMimoVoice(voiceId: string) {
+  if (store.speechConfig.mimoSource === 'server') return
+  store.setMimoSpeechVoice(voiceId)
   ttsPanelDismissed.value = false
   showTTSPanel.value = true
   if (store.isSpeaking && !store.isPaused) {
@@ -3078,7 +3094,8 @@ watch(() => store.isSpeaking, (speaking) => {
   if (speaking && !ttsPanelDismissed.value) {
     showTTSPanel.value = true
   }
-  if (!speaking && !store.isAutoScrolling) {
+  // 暂停时 isSpeaking 也变 false：暂停不清高亮，否则恢复后高亮丢失
+  if (!speaking && !store.isPaused && !store.isAutoScrolling) {
     clearReadingClass()
   }
 })
